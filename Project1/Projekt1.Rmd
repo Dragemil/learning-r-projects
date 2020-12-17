@@ -1,0 +1,719 @@
+---
+title: "R i Python - Projekt 1"
+author: "Emil Dragańczuk"
+output: html_document
+date: "24 Kwietnia 2020"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE)
+```
+
+```{r echo=FALSE, include=FALSE}
+library(sqldf)
+library(dplyr)
+library(data.table)
+library(microbenchmark)
+```
+
+# Wprowadzenie
+
+Projekt skupia się na zaimplementowaniu 7 zapytań SQL w R na 3 różne sposoby - przy pomocy funkcji z bibliotek `base`, `dplyr` i `data.table`, oraz na przeprowadzeniu testów tych rozwiązań. Punktem odniesienia będą rozwiązania osiągnięte przy pomocy biblioteki `sqldf`.
+
+# Funkcje pomocnicze
+
+## Wczytanie danych
+
+Wczytanie danych z podanych plików csv:
+```{r}
+options(stringsAsFactors=FALSE)
+
+Badges <- read.csv("travel_stackexchange_com\\Badges.csv")
+Comments <- read.csv("travel_stackexchange_com\\Comments.csv")
+PostLinks <- read.csv("travel_stackexchange_com\\PostLinks.csv")
+Posts <- read.csv("travel_stackexchange_com\\Posts.csv")
+Tags <- read.csv("travel_stackexchange_com\\Tags.csv")
+Users <- read.csv("travel_stackexchange_com\\Users.csv")
+Votes <- read.csv("travel_stackexchange_com\\Votes.csv")
+```
+
+## Testowanie rozwiązań
+
+Sprawdzenie poprawności rozwiązań, opcjonalnie z dokładnością co do kolejności wierszy, oraz przeprowadzenie benchmarków.
+```{r}
+TestAndBenchmark <- function(expected, baseSol, dplyrSol, dataTableSol, withOrder = TRUE) {
+  print("Checking each solution...")
+  
+  baseSolEq = all_equal(expected(), baseSol(), ignore_row_order = !withOrder)
+  print(paste("Base solution correct:", baseSolEq))
+  
+  dplyrSolEq = all_equal(expected(), dplyrSol(), ignore_row_order = !withOrder)
+  print(paste("Dplyr solution correct:", dplyrSolEq))
+  
+  dataTableSolEq = all_equal(expected(), dataTableSol(), ignore_row_order = !withOrder)
+  print(paste("Data.table solution correct:", dataTableSolEq))
+  
+  print("Benchmarking each solution...")
+  microbenchmark::microbenchmark(
+    sqldf=expected(),
+    base=baseSol(),
+    dplyr=dplyrSol(),
+    data.table=dataTableSol(),
+    times = 10L
+  )
+}
+```
+
+# Rozwiązania
+
+## Zapytanie 1
+
+Zapytanie wyszukuje posty będące pytaniami o największej ilości "upvote'ów" w każdym roku.
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query1_1 <- function() {
+  sqldf(
+    "SELECT
+    Posts.Title,
+    UpVotesPerYear.Year,
+    MAX(UpVotesPerYear.Count) AS Count
+    FROM (
+      SELECT
+      PostId,
+      COUNT(*) AS Count,
+      STRFTIME('%Y', Votes.CreationDate) AS Year
+      FROM Votes
+      WHERE VoteTypeId=2
+      GROUP BY PostId, Year
+    ) AS UpVotesPerYear
+    JOIN Posts ON Posts.Id=UpVotesPerYear.PostId
+    WHERE Posts.PostTypeId=1
+    GROUP BY Year"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query1_2 <- function() {
+  UpVotesPerYear <- subset(Votes, VoteTypeId == 2)
+  UpVotesPerYear <- transform(UpVotesPerYear, Year=substring(CreationDate, 1, 4))
+  UpVotesPerYear <- UpVotesPerYear[,c("PostId","Year")]
+  UpVotesPerYear <- aggregate(UpVotesPerYear, by = UpVotesPerYear[, c("Year", "PostId")], length)
+  UpVotesPerYear <- transform(UpVotesPerYear, Count = UpVotesPerYear[,3])
+  UpVotesPerYear <- UpVotesPerYear[,c("PostId", "Count", "Year")]
+  
+  Query1_2 <- merge(UpVotesPerYear, Posts[Posts$PostTypeId==1,], by.x = "PostId", by.y = "Id")
+  Query1_2 <- do.call(rbind, lapply(split(Query1_2, as.factor(Query1_2$Year)), function(z) {z[which.max(z$Count),]}))
+  Query1_2 <- Query1_2[,c("Title", "Year", "Count")]
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query1_3 <- function() {
+  UpVotesPerYear <- Votes %>%
+    filter(VoteTypeId == 2) %>%
+    mutate(Year = substring(CreationDate, 1, 4)) %>%
+    select(PostId, Year) %>%
+    group_by(PostId, Year) %>%
+    summarise(Count = n())
+  
+  Query1_3 = UpVotesPerYear %>%
+    inner_join(Posts, by = c("PostId" = "Id")) %>%
+    filter(PostTypeId == 1) %>%
+    group_by(Year) %>%
+    filter(Count == max(Count)) %>%
+    select(Title, Count, Year)
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query1_4 <- function() {
+  UpVotesPerYear <- as.data.table(Votes)
+  UpVotesPerYear <- UpVotesPerYear[VoteTypeId == 2, .(PostId, Year = substring(CreationDate, 1, 4))]
+  UpVotesPerYear <- UpVotesPerYear[, Count := .N, by = .(PostId, Year)][, .SD[1], by = .(PostId, Year)]
+  
+  Query1_4 <- merge(as.data.table(Posts)[PostTypeId == 1], UpVotesPerYear, by.x = "Id", by.y = "PostId")
+  Query1_4 <- Query1_4[, .(Title, Year, Count)][,.SD[which.max(Count)], by = Year]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query1_1, Query1_2, Query1_3, Query1_4, withOrder = FALSE)
+```
+
+## Zapytanie 2
+
+Zapytanie wyszukuje informacje o 10 użytkownikach z największą sumą polubień na utworzonych pytaniach, a w nich:
+1. nazwę
+2. wiek
+3. miejsce
+4. suma polubień na stworzonych pytaniach
+5. tytuł najbardziej lubionego utworzonego pytania
+6. najwięcej polubień pod jednym utworzonym zapytaniem
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query2_1 <- function() {
+  sqldf(
+    "SELECT
+      Users.DisplayName,
+      Users.Age,
+      Users.Location,
+      SUM(Posts.FavoriteCount) AS FavoriteTotal,
+      Posts.Title AS MostFavoriteQuestion,
+      MAX(Posts.FavoriteCount) AS MostFavoriteQuestionLikes
+    FROM Posts
+    JOIN Users ON Users.Id=Posts.OwnerUserId
+    WHERE Posts.PostTypeId=1
+    GROUP BY OwnerUserId
+    ORDER BY FavoriteTotal DESC
+    LIMIT 10"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query2_2 <- function() {
+  Query2_2 <- subset(Posts, PostTypeId == 1) 
+  Query2_2 <- merge(Query2_2, Users, by.x = "OwnerUserId", by.y = "Id")
+  
+  Query2_2 <- do.call(rbind, lapply(split(Query2_2, as.factor(Query2_2$OwnerUserId)),  function(x) {
+    cbind(
+      data.frame(x[which.max(x$FavoriteCount)[1],]),
+      data.frame(FavoriteTotal = sum(x$FavoriteCount, na.rm = TRUE)))}))
+  Query2_2 <- Query2_2[order(-Query2_2$FavoriteTotal),]
+  Query2_2 <- head(Query2_2, 10)
+  Query2_2[c("MostFavoriteQuestion","MostFavoriteQuestionLikes")] <- Query2_2[c("Title", "FavoriteCount")]
+  Query2_2 <- Query2_2[,c("DisplayName", "Age", "Location", "FavoriteTotal", "MostFavoriteQuestion", "MostFavoriteQuestionLikes")]
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query2_3 <- function() {
+  Query2_3 <- Posts %>%
+    filter(PostTypeId==1) %>%
+    inner_join(Users, by = c("OwnerUserId" = "Id")) %>%
+    group_by(OwnerUserId) %>%
+    mutate(FavoriteTotal = sum(FavoriteCount, na.rm = TRUE)) %>%
+    slice(which.max(FavoriteCount)) %>%
+    ungroup() %>%
+    select(DisplayName, Age, Location, FavoriteTotal, MostFavoriteQuestion = Title, MostFavoriteQuestionLikes = FavoriteCount) %>%
+    arrange(desc(FavoriteTotal)) %>%
+    head(10)
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query2_4 <- function() {
+  Query2_4 <- merge(as.data.table(Posts)[PostTypeId == 1], as.data.table(Users), by.x = "OwnerUserId", by.y = "Id")
+  Query2_4 <- Query2_4[,.(
+    DisplayName,
+    Age,
+    Location,
+    FavoriteTotal = sum(FavoriteCount, na.rm = TRUE),
+    MostFavoriteQuestion = Title,
+    FavoriteCount), by = OwnerUserId]
+  Query2_4 <- Query2_4[,.SD[which.max(FavoriteCount)], by = OwnerUserId]
+  Query2_4 <- setorder(Query2_4, -FavoriteTotal, na.last = TRUE)
+  Query2_4 <- Query2_4[1:10, .(DisplayName, Age, Location, FavoriteTotal, MostFavoriteQuestion, MostFavoriteQuestionLikes = FavoriteCount)]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query2_1, Query2_2, Query2_3, Query2_4, withOrder = TRUE)
+```
+
+## Zapytanie 3
+
+Zapytanie wypisuje 10 postów z największą liczbą pozytywnie ocenionych odpowiedzi. 
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query3_1 <- function() {
+  sqldf(
+    "SELECT
+    Posts.ID,
+    Posts.Title,
+    Posts2.PositiveAnswerCount
+    FROM Posts
+    JOIN (
+      SELECT
+      Posts.ParentID,
+      COUNT(*) AS PositiveAnswerCount
+      FROM Posts
+      WHERE Posts.PostTypeID=2 AND Posts.Score>0
+      GROUP BY Posts.ParentID
+    ) AS Posts2
+    ON Posts.ID=Posts2.ParentID
+    ORDER BY Posts2.PositiveAnswerCount DESC
+    LIMIT 10"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query3_2 <- function() {
+  Posts2 = subset(Posts, PostTypeId == 2 & Score > 0)
+  Posts2 <- aggregate(Posts2, by = list(Posts2$ParentId), length)
+  Posts2 <- transform(Posts2, PositiveAnswerCount = Posts2[,2])
+  Posts2["ParentId"] = Posts2[,1]
+  Posts2 <- Posts2[,c("ParentId", "PositiveAnswerCount")]
+  
+  Query3_2 <- merge(Posts, Posts2, by.x = "Id", by.y = "ParentId")
+  Query3_2 <- Query3_2[,c("Id", "Title", "PositiveAnswerCount")]
+  Query3_2 <- Query3_2[order(-Query3_2$PositiveAnswerCount),]
+  Query3_2 <- head(Query3_2, 10)
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query3_3 <- function() {
+  Posts2 = Posts %>%
+    filter(PostTypeId == 2 & Score > 0) %>%
+    group_by(ParentId) %>%
+    summarise(PositiveAnswerCount = n())
+  
+  Query3_3 = inner_join(Posts, Posts2, by = c("Id" = "ParentId")) %>%
+    arrange(desc(PositiveAnswerCount)) %>%
+    head(10) %>%
+    select(Id, Title, PositiveAnswerCount)
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+
+Query3_4 <- function() {
+  Posts2 <- as.data.table(Posts)
+  Posts2 <- Posts2[PostTypeId == 2 & Score > 0, .(PositiveAnswerCount = .N), keyby = ParentId]
+  
+  Query3_4 <- merge(as.data.table(Posts), Posts2, by.x = "Id", by.y = "ParentId")
+  Query3_4 <- Query3_4[,.(Id, Title, PositiveAnswerCount)]
+  Query3_4 <- setorder(Query3_4, -PositiveAnswerCount)
+  Query3_4 <- Query3_4[1:10]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query3_1, Query3_2, Query3_3, Query3_4, withOrder = TRUE)
+```
+
+## Zapytanie 4
+
+Zapytanie wyszukuje pytania o największej różnicy punktów w najbardziej punktowanej odpowiedzi i zaakceptowanej odpowiedzi.
+Brane pod uwagę są tylko te zapytania których powyższa różnica jest większa od 50. Całość jest posortowana malejąco po powyższej różnicy.
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query4_1 <- function() {
+  sqldf(
+    "SELECT
+    Questions.Id,
+    Questions.Title,
+    BestAnswers.MaxScore,
+    Posts.Score AS AcceptedScore,
+    BestAnswers.MaxScore-Posts.Score AS Difference
+    FROM (
+      SELECT Id, ParentId, MAX(Score) AS MaxScore
+      FROM Posts
+      WHERE PostTypeId==2
+      GROUP BY ParentId
+    ) AS BestAnswers
+    JOIN (
+      SELECT * FROM Posts
+      WHERE PostTypeId==1
+    ) AS Questions
+    ON Questions.Id=BestAnswers.ParentId
+    JOIN Posts ON Questions.AcceptedAnswerId=Posts.Id
+    WHERE Difference>50
+    ORDER BY Difference DESC"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query4_2 <- function() {
+  BestAnswers <- Posts[Posts$PostTypeId == 2,]
+  BestAnswers <- do.call(rbind, lapply(split(BestAnswers, as.factor(BestAnswers$ParentId)), function(z) {z[which.max(z$Score),]}))
+  BestAnswers["MaxScore"] = BestAnswers["Score"]
+  BestAnswers <- BestAnswers[,c("Id","ParentId","MaxScore")]
+  
+  Questions <- Posts[Posts$PostTypeId == 1,]
+  
+  Query4_2 <- merge(BestAnswers, Questions, by.x = "ParentId", by.y = "Id")
+  Query4_2 <- merge(Query4_2, Posts, by.x = "AcceptedAnswerId", by.y = "Id")
+  Query4_2 <- transform(Query4_2, Difference = MaxScore - Score.y) 
+  Query4_2 <- subset(Query4_2, Difference > 50)
+  Query4_2 <- transform(Query4_2, Title = Title.x, AcceptedScore = Score.y, Id = ParentId.x)
+  Query4_2 <- Query4_2[,c("Id", "Title", "MaxScore", "AcceptedScore", "Difference")]
+  Query4_2 <- Query4_2[order(-Query4_2$Difference),]
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query4_3 <- function() {
+  BestAnswers <- Posts %>%
+    filter(PostTypeId == 2) %>%
+    group_by(ParentId) %>%
+    slice(which.max(Score)) %>%
+    select(Id, ParentId, MaxScore = Score)
+  
+  Questions <- filter(Posts, PostTypeId == 1)
+  
+  Query4_3 <- inner_join(BestAnswers, Questions, by = c("ParentId" = "Id")) %>%
+    inner_join(Posts, by = c("AcceptedAnswerId" = "Id")) %>%
+    select(Id = ParentId.x, Title = Title.x, MaxScore, AcceptedScore = Score.y) %>%
+    mutate(Difference = MaxScore - AcceptedScore) %>%
+    filter(Difference > 50) %>%
+    arrange(desc(Difference))
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query4_4 <- function() {
+  BestAnswers <- as.data.table(Posts)[PostTypeId == 2, .(Id, ParentId, MaxScore = max(Score)), keyby = Score]
+  BestAnswers <- BestAnswers[, .(Id, ParentId, MaxScore)]
+  
+  Questions <- as.data.table(Posts)[PostTypeId==1]
+  
+  Query4_4 <- merge(BestAnswers, Questions, by.x = "ParentId", by.y = "Id")
+  Query4_4 <- merge(Query4_4, as.data.table(Posts), by.x = "AcceptedAnswerId", by.y = "Id")
+  Query4_4 <- Query4_4[,.(Id = ParentId.x, Title = Title.x, MaxScore, AcceptedScore = Score.y, Difference = MaxScore - Score.y)]
+  Query4_4 <- Query4_4[Difference > 50]
+  Query4_4 <- setorder(Query4_4, -Difference)[, .SD[1], by = "Id"]
+}
+```
+
+### Testy
+
+```{r warning=FALSE}
+TestAndBenchmark(Query4_1, Query4_2, Query4_3, Query4_4, withOrder = TRUE)
+```
+
+## Zapytanie 5
+
+Zapytanie wypisuje 10 pytań skomentowane przez postujących je o największej sumie punktów pod komentarzami pod nimi.
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query5_1 <- function() {
+  sqldf(
+    "SELECT
+    Posts.Title,
+    CmtTotScr.CommentsTotalScore
+    FROM (
+      SELECT
+      PostID,
+      UserID,
+      SUM(Score) AS CommentsTotalScore
+      FROM Comments
+      GROUP BY PostID, UserID
+    ) AS CmtTotScr
+    JOIN Posts ON Posts.ID=CmtTotScr.PostID AND Posts.OwnerUserId=CmtTotScr.UserID
+    WHERE Posts.PostTypeId=1
+    ORDER BY CmtTotScr.CommentsTotalScore DESC
+    LIMIT 10"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query5_2 <- function() {
+  CmtTotScr <- aggregate(Comments$Score, by = Comments[, c("UserId", "PostId")], sum)
+  CmtTotScr["CommentsTotalScore"] <- CmtTotScr["x"]
+  CmtTotScr <- CmtTotScr[,-3]
+  
+  Query5_2 <- merge(Posts[Posts$PostTypeId == 1,], CmtTotScr, by.x = c("Id", "OwnerUserId"), by.y = c("PostId", "UserId"))
+  Query5_2 <- Query5_2[order(-Query5_2$CommentsTotalScore),] %>% head(10)
+  Query5_2 <- Query5_2[,c("Title", "CommentsTotalScore")]
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query5_3 <- function() {
+  CmtTotScr <- Comments %>%
+    group_by(PostId, UserId) %>%
+    summarise(CommentsTotalScore = sum(Score))
+  
+  Query5_3 <- Posts %>%
+    filter(PostTypeId == 1) %>%
+    inner_join(CmtTotScr, by = c("Id" = "PostId", "OwnerUserId" = "UserId")) %>%
+    arrange(desc(CommentsTotalScore)) %>%
+    head(10) %>%
+    select(Title, CommentsTotalScore)
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query5_4 <- function() {
+  CmtTotScr <- as.data.table(Comments)
+  CmtTotScr <- CmtTotScr[, .(CommentsTotalScore = sum(Score)), keyby = .(UserId, PostId)]
+  
+  Query5_4 <- merge(as.data.table(Posts)[PostTypeId == 1], CmtTotScr, by.x = c("Id", "OwnerUserId"), by.y = c("PostId", "UserId"))
+  Query5_4 <- setorder(Query5_4, -CommentsTotalScore)
+  Query5_4 <- Query5_4[1:10, .(Title, CommentsTotalScore)]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query5_1, Query5_2, Query5_3, Query5_4, withOrder = TRUE)
+```
+
+## Zapytanie 6
+
+Zapytanie wypisuje użytkowników którzy kierdykolwiek otrzymali "cenną odznakę". Jako "cenną odznakę" uznajemy odznakę która została osiągnięta od 2 do 10 razy kiedykolwiek.
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query6_1 <- function() {
+  sqldf(
+    "SELECT DISTINCT
+    Users.Id,
+    Users.DisplayName,
+    Users.Reputation,
+    Users.Age,
+    Users.Location
+    FROM (
+      SELECT
+      Name, UserID
+      FROM Badges
+      WHERE Name IN (
+        SELECT
+        Name
+        FROM Badges
+        WHERE Class=1
+        GROUP BY Name
+        HAVING COUNT(*) BETWEEN 2 AND 10
+      )
+      AND Class=1
+    ) AS ValuableBadges
+    JOIN Users ON ValuableBadges.UserId=Users.Id"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query6_2 <- function() {
+  Badges1 <- Badges[Badges$Class == 1, "Name"]
+  Badges1 <- aggregate(Badges1, by = list(Badges1), length)
+  Badges1["Name"] <- Badges1[,1]
+  Badges1 <- Badges1[Badges1[,2] >= 2 & Badges1[,2] <= 10, "Name"]
+  
+  ValuableBadges <- Badges[Badges$Class == 1 &  Badges$Name %in% Badges1, c("Name", "UserId")]
+  
+  Query6_2 <- merge(Users, ValuableBadges, by.x = "Id", by.y = "UserId")
+  Query6_2 <- unique(Query6_2[,c("Id", "DisplayName", "Reputation", "Age", "Location")])
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query6_3 <- function() {
+  Badges1 <- simplify2array(Badges %>%
+    filter(Class == 1) %>%
+    group_by(Name) %>%
+    summarise(Cnt = n()) %>%
+    filter(Cnt >= 2 & Cnt <= 10) %>%
+    select(Name))
+  
+  ValuableBadges <- Badges %>%
+    filter(Class == 1 & Name %in% Badges1) %>%
+    select(Name, UserId)
+  
+  Query6_3 <- inner_join(Users, ValuableBadges, by = c("Id" = "UserId")) %>%
+    select(Id, DisplayName, Reputation, Age, Location) %>%
+    distinct()
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query6_4 <- function() {
+  Badges1 <- as.data.table(Badges)[Class == 1, .N, keyby = Name]
+  Badges1 <- Badges1[N >= 2 & N <= 10, Name]
+  
+  ValuableBadges <- as.data.table(Badges)[Class == 1 & Name %in% Badges1, .(Name, UserId)]
+  
+  Query6_4 <- merge(as.data.table(Users), ValuableBadges, by.x = "Id", by.y = "UserId")
+  Query6_4 <- Query6_4[, .SD[1], by = .(Id, DisplayName, Reputation, Age, Location)]
+  Query6_4 <- Query6_4[,.(Id, DisplayName, Reputation, Age, Location)]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query6_1, Query6_2, Query6_3, Query6_4, withOrder = FALSE)
+```
+
+## Zapytanie 7
+
+Zapytanie wypisuje 10 pytań bez żadnych głosów z 2016 lub 2017 roku, zaś o największej liczbie głosów z poprzednich lat.
+
+Wartość z podzapytania `Votes` nie została wzięta pod uwagę w rozwiązaniach, ponieważ nie jest wykorzystywana w zapytaniu głównym. 
+
+### Rozwiązanie `sqldf`
+
+```{r}
+Query7_1 <- function() {
+  sqldf(
+    "SELECT
+    Posts.Title,
+    VotesByAge2.OldVotes
+    FROM Posts
+    JOIN (
+      SELECT
+      PostId,
+      MAX(CASE WHEN VoteDate = 'new' THEN Total ELSE 0 END) NewVotes,
+      MAX(CASE WHEN VoteDate = 'old' THEN Total ELSE 0 END) OldVotes,
+      SUM(Total) AS Votes
+      FROM (
+        SELECT
+        PostId,
+        CASE STRFTIME('%Y', CreationDate)
+        WHEN '2017' THEN 'new'
+        WHEN '2016' THEN 'new'
+        ELSE 'old'
+        END VoteDate,
+        COUNT(*) AS Total
+        FROM Votes
+        WHERE VoteTypeId=2
+        GROUP BY PostId, VoteDate
+      ) AS VotesByAge
+      GROUP BY VotesByAge.PostId
+      HAVING NewVotes=0
+    ) AS VotesByAge2 ON VotesByAge2.PostId=Posts.ID
+    WHERE Posts.PostTypeId=1
+    ORDER BY VotesByAge2.OldVotes DESC
+    LIMIT 10"
+  )
+}
+```
+
+### Rozwiązanie `base`
+
+```{r}
+Query7_2 <- function() {
+  VotesByAge <- Votes[Votes$VoteTypeId == 2, c("CreationDate", "PostId")]
+  VotesByAge <- transform(VotesByAge, VoteDate = substring(CreationDate, 1, 4))
+  VotesByAge <- transform(VotesByAge, VoteDate = ifelse(VoteDate == 2016 | VoteDate == 2017, "new", "old"))
+  VotesByAge <- aggregate(VotesByAge, by = VotesByAge[,c("PostId", "VoteDate")], length)
+  VotesByAge["Total"] <- VotesByAge[,3]
+  VotesByAge <- VotesByAge[,c("PostId", "VoteDate", "Total")]
+  
+  NewVotes <- aggregate(ifelse(VotesByAge$VoteDate == "new", VotesByAge$Total, 0L), by = list(VotesByAge$PostId), max)
+  OldVotes <- aggregate(ifelse(VotesByAge$VoteDate == "old", VotesByAge$Total, 0L), by = list(VotesByAge$PostId), max)
+  VotesByAge2 <- cbind(NewVotes, OldVotes[,2])
+  colnames(VotesByAge2) = c("PostId", "NewVotes", "OldVotes")
+  VotesByAge2 <- subset(VotesByAge2, NewVotes == 0)
+  
+  Query7_2 <- subset(Posts, PostTypeId == 1)
+  Query7_2 <- merge(Query7_2, VotesByAge2, by.x = "Id", by.y = "PostId")
+  Query7_2 <- Query7_2[order(-Query7_2$OldVotes),]
+  Query7_2 <- head(Query7_2, 10)
+  Query7_2 <- Query7_2[,c("Title", "OldVotes")]
+}
+```
+
+### Rozwiązanie `dplyr`
+
+```{r}
+Query7_3 <- function() {
+  VotesByAge <- Votes %>%
+    filter(VoteTypeId == 2) %>%
+    select(CreationDate, PostId) %>%
+    mutate(VoteDate = substring(CreationDate, 1, 4)) %>%
+    mutate(VoteDate = case_when (VoteDate == 2016 | VoteDate == 2017 ~ "new", TRUE ~ "old" )) %>%
+    group_by(PostId, VoteDate) %>%
+    summarise(Total = n()) %>%
+    ungroup()
+  
+  VotesByAge2 <- VotesByAge %>%
+    group_by(PostId) %>%
+    mutate(
+      NewVotes = max(case_when(VoteDate == "new" ~ Total, TRUE ~ 0L)),
+      OldVotes = max(case_when(VoteDate == "old" ~ Total, TRUE ~ 0L))) %>%
+    filter(NewVotes == 0) %>%
+    select(PostId, NewVotes, OldVotes)
+  
+  Query7_3 = Posts %>%
+    filter(PostTypeId == 1) %>%
+    inner_join(VotesByAge2, by = c("Id" = "PostId")) %>%
+    arrange(desc(OldVotes)) %>%
+    head(10) %>%
+    select(Title, OldVotes)
+}
+```
+
+### Rozwiązanie `data.table`
+
+```{r}
+Query7_4 <- function() {
+  VotesByAge <- as.data.table(Votes)[VoteTypeId == 2, .(CreationDate, PostId)]
+  VotesByAge <- VotesByAge[,.(PostId, VoteDate = substring(CreationDate, 1, 4))]
+  VotesByAge <- VotesByAge[,.(PostId, VoteDate = fifelse(VoteDate == 2016 | VoteDate == 2017, "new", "old"))]
+  VotesByAge <- VotesByAge[,.N, by = .(PostId, VoteDate)][,.(PostId, VoteDate, Total = N)]
+  
+  VotesByAge2 <- VotesByAge[, .(NewVotes = max(fifelse(VoteDate == "new", Total, 0L)), OldVotes = max(fifelse(VoteDate == "old", Total, 0L))), by = .(PostId)]
+  VotesByAge2 <- VotesByAge2[NewVotes == 0]
+  
+  Query7_4 <- as.data.table(Posts)[PostTypeId == 1]
+  Query7_4 <- merge(Query7_4, VotesByAge2, by.x = "Id", by.y = "PostId")
+  Query7_4 <- setorder(Query7_4, -OldVotes)
+  Query7_4 <- Query7_4[1:10, .(Title, OldVotes)]
+}
+```
+
+### Testy
+
+```{r}
+TestAndBenchmark(Query7_1, Query7_2, Query7_3, Query7_4, withOrder = TRUE)
+```
