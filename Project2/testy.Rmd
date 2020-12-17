@@ -1,0 +1,146 @@
+---
+title: "Testy poprawności funkcji `knn` i funkcji agregujących"
+author: "Emil Dragańczuk"
+date: "17 maja 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, cache = TRUE)
+
+source("prepare.R")
+```
+
+# Wprowadzenie
+W poniższym raporcie sprawdzamy poprawność funkcji `knn` poprzez sprawdzenie warunku koniecznego dla różnych wywołań oraz analizując procent poprawnie odgadniętych etykiet i błędy bezwględne na wykresach. 
+
+# Sprawdzenie warunku koniecznego poprawności funkcji `knn`
+Poniżej sprawdzimy czy dla funkcji `knn` zachodzi warunek konieczny poprawności, czyli czy dla wywołania funkcji z parametrami `knn(trainingSet, trainingLabels, testSet = trainingSet, k = 1, p = p)` wynikowe etykiety są równe etykietom ze zbioru treningowego. Będziemy rozważać \(p \in \{1, 2, \infty\}\). Użyjemy do tego poniższej funkcji:
+
+``` {r necessaryConditionForKnn, eval=FALSE}
+necessaryConditionForKnn <- function(dataSet, p = 2) {
+  labels <- dataSet[,1]
+  variables <- data.matrix(dataSet[, 2:ncol(dataSet)])
+  
+  resultLabels <- knn(variables, labels, variables, 1, p)
+  
+  print(paste(
+    "Warunek konieczny dla p=", p, " spełniony: ",
+    all(labels == resultLabels), sep = ""))
+}
+```
+
+## Zbiór danych `abalone.csv`
+
+``` {r abaloneNecessary}
+for (p in c(1, 2, Inf)){
+  necessaryConditionForKnn(head(abalone, 1000), p)
+}
+```
+
+## Zbiór danych `californiahousing.csv`
+
+``` {r californiaNecessary}
+for (p in c(1, 2, Inf)){
+  necessaryConditionForKnn(head(californiahousing, 1000), p)
+}
+```
+
+## Zbiór danych `winequality-red.csv`
+
+``` {r redwineNecessary}
+for (p in c(1, 2, Inf)){
+  necessaryConditionForKnn(head(redwine, 1000), p)
+}
+```
+
+# Wykresy błędów bezwzględnych dla różnych konfiguracji danych
+
+Rozważymy procent poprawnych predykcji oraz błędy bezwzględne dla różnych wywołań funkcji `knn`. W wywołaniach funkcji uwzględnimy różne zbiory danych oraz 3 z dostępnych agregatorów: `moda`, `srednia_a` i `wazonyrand`. Testy zostaną przeprowadzone dla zbiorów treningowych o wielkości 1000, 100 danych testowych, \(k=10\) oraz \(p=2\). Wykresy będziemy rysować następującą funkcją:
+
+``` {r plotFun, eval=FALSE}
+plotAbsoluteErrors <- function(dataSet, n, m, k, aggregator = moda, p = 2){
+  nm <- n + m
+  sampledData <- dataSet[sample(nm, size = nm, replace = FALSE), 1:3]
+  dataNames <- names(sampledData)
+  trainingSet <- data.matrix(sampledData[1:n, -1])
+  trainingLabels <- sampledData[1:n, 1]
+  testSet <- data.matrix(sampledData[n+1:m, -1])
+  correctLabels <- sampledData[n+1:m, 1]
+  
+  resultLabels <- aggregator(knn(trainingSet, trainingLabels, testSet, k, p))
+  correctPercent <- round(sum(resultLabels == correctLabels) / m * 100, 1)
+  result <- data.frame(cbind(abs(correctLabels - resultLabels), testSet))
+  
+  ggplot(result, aes(x=result[, 2],y=result[, 3], col=result[, 1])) +
+    geom_point() +
+    ggtitle(paste("Wykres bledu bezwzglednego predykcji etykiety (", correctPercent, "% poprawnych)", sep = "")) +
+    xlab(dataNames[2]) +
+    ylab(dataNames[3]) +
+    scale_color_gradient(low="green", high="red", name = paste("Blad bezwzgledny predykcji etykiety", dataNames[1]))
+}
+```
+
+## Zbiór danych `abalone.csv`
+
+### Agregator `moda`
+
+``` {r abaloneModaErr}
+plotAbsoluteErrors(abalone[,c(1, 3, 6)], 1000, 100, k = 10, aggregator = moda, p = 2)
+```
+
+### Agregator `srednia_a`
+
+``` {r abaloneSredniaErr}
+plotAbsoluteErrors(abalone[,c(1, 3, 6)], 1000, 100, k = 10, aggregator = srednia_a, p = 2)
+```
+
+### Agregator `wazonyrand`
+
+``` {r abaloneRandErr}
+plotAbsoluteErrors(abalone[,c(1, 3, 6)], 1000, 100, k = 10, aggregator = wazonyrand, p = 2)
+```
+
+## Zbiór danych `californiahousing.csv`
+
+### Agregator `moda`
+
+``` {r californiaModaErr}
+plotAbsoluteErrors(californiahousing, 1000, 100, k = 10, aggregator = moda, p = 2)
+```
+
+### Agregator `srednia_a`
+
+``` {r californiaSredniaErr}
+plotAbsoluteErrors(californiahousing, 1000, 100, k = 10, aggregator = srednia_a, p = 2)
+```
+
+### Agregator `wazonyrand`
+
+``` {r californiaRandErr}
+plotAbsoluteErrors(californiahousing, 1000, 100, k = 10, aggregator = wazonyrand, p = 2)
+```
+
+## Zbiór danych `winequality-red.csv`
+
+### Agregator `moda`
+
+``` {r redwineModaErr}
+plotAbsoluteErrors(redwine, 1000, 100, k = 10, aggregator = moda, p = 2)
+```
+
+### Agregator `srednia_a`
+
+``` {r redwineSredniaErr}
+plotAbsoluteErrors(redwine, 1000, 100, k = 10, aggregator = srednia_a, p = 2)
+```
+
+### Agregator `wazonyrand`
+
+``` {r redwineRandErr}
+plotAbsoluteErrors(redwine, 1000, 100, k = 10, aggregator = wazonyrand, p = 2)
+```
+
+## Podsumowanie wykresów
+
+Procenty poprawnie przewidzianych etykiet są w każdym przypadku znacznie wyższe niż jakby były nadawane losowo. Ponadto na wykresach można zobaczyć, że znaczna część etykiet jest minimalnie oddalona od poprawnych wyników, tylko pojedyncze wartości są zupełnie niepoprawne. Poza poprawnością mimo wszystko nie da się zauważyć jak bardzo zbiór treningowy wpływa na efektywność algorytmu.
